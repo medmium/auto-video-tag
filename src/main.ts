@@ -1,99 +1,153 @@
-import {App, Editor, MarkdownView, Modal, Notice, Plugin} from 'obsidian';
-import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
+import { Plugin, MarkdownView, TFile } from 'obsidian';
 
-// Remember to rename these classes and interfaces!
-
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class VideoAttachmentPlugin extends Plugin {
+	private isProcessing = false;
+	private lastKnownContent: string = '';
 
 	async onload() {
-		await this.loadSettings();
+		console.log('Video Attachment Plugin loaded');
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
+		// 监听编辑器内容变化
+		this.registerEvent(
+			this.app.workspace.on('editor-change', async (editor, view) => {
+				if (!(view instanceof MarkdownView)) return;
+				
+				const currentContent = editor.getValue();
+				const addedText = this.findAddedText(this.lastKnownContent, currentContent);
+				this.lastKnownContent = currentContent;
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection('Sample editor command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+				// 检查新增文本中是否有MP4链接
+				if (addedText && this.containsMp4Link(addedText)) {
+					await this.convertMp4LinksToVideoTags(editor);
 				}
-				return false;
-			}
-		});
+			})
+		);
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+		// 监听拖拽事件
+		this.registerEvent(
+			this.app.workspace.on('editor-drop', async (event, editor, view) => {
+				if (!(view instanceof MarkdownView)) return;
+				
+				event.preventDefault();
+				
+				// 延迟处理，等待文件操作完成
+				setTimeout(async () => {
+					await this.convertMp4LinksToVideoTags(editor);
+				}, 300);
+			})
+		);
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
-		});
+		// 监听粘贴事件
+		this.registerEvent(
+			this.app.workspace.on('editor-paste', async (clipboardEvent, editor, view) => {
+				if (!(view instanceof MarkdownView)) return;
+				
+				// 延迟处理，等待粘贴操作完成
+				setTimeout(async () => {
+					await this.convertMp4LinksToVideoTags(editor);
+				}, 100);
+			})
+		);
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-
+		// 监听文件创建事件（用于处理外部拖入的文件）
+		this.registerEvent(
+			this.app.vault.on('create', async (file) => {
+				if (!(file instanceof TFile)) return;
+				
+				if (file.extension === 'mp4') {
+					// 延迟处理，确保文件被完全写入
+					setTimeout(async () => {
+						const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+						if (activeView && activeView.editor) {
+							await this.convertMp4LinksToVideoTags(activeView.editor);
+						}
+					}, 500);
+				}
+			})
+		);
 	}
 
 	onunload() {
+		console.log('Video Attachment Plugin unloaded');
 	}
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<MyPluginSettings>);
+	private findAddedText(oldText: string, newText: string): string {
+		if (newText.length <= oldText.length) return '';
+		
+		// 寻找新增的部分
+		const commonStart = this.getLongestCommonPrefix(oldText, newText);
+		const addedPart = newText.substring(commonStart.length);
+		
+		return addedPart;
 	}
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
-}
-
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
+	private getLongestCommonPrefix(str1: string, str2: string): string {
+		let i = 0;
+		while (i < str1.length && i < str2.length && str1[i] === str2[i]) {
+			i++;
+		}
+		return str1.substring(0, i);
 	}
 
-	onOpen() {
-		let {contentEl} = this;
-		contentEl.setText('Woah!');
+	private containsMp4Link(text: string): boolean {
+		return /!\[([^\]]*)\]\([^)]*\.mp4\)/i.test(text) || 
+			   /!\[\[.*\.mp4\]\]/i.test(text);
 	}
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
+	private async convertMp4LinksToVideoTags(editor: any) {
+		if (this.isProcessing) return;
+		
+		const content = editor.getValue();
+		let newContent = content;
+		let updated = false;
+
+		// 匹配标准Markdown图片语法: ![alt](path/to/video.mp4)
+		const standardLinkRegex = /!\[([^\]]*)\]\(([^)]*\.mp4(?:\?[^\s)]*)?)\)/gi;
+		let match;
+		while ((match = standardLinkRegex.exec(content)) !== null) {
+			const fullMatch = match[0];
+			const altText = match[1];
+			const videoSrc = match[2];
+			
+			// 检查是否已经是video标签
+			if (!this.isAlreadyVideoTag(content, match.index)) {
+				const videoTag = `<video src="${videoSrc}" controls>\n  您的浏览器不支持视频标签。\n</video>`;
+				newContent = newContent.replace(fullMatch, videoTag);
+				updated = true;
+			}
+		}
+
+		// 匹配Obsidian内部链接语法: ![[video.mp4]]
+		const internalLinkRegex = /!\[\[(.*?\.mp4)(?:\|(.*?))?\]\]/gi;
+		while ((match = internalLinkRegex.exec(content)) !== null) {
+			const fullMatch = match[0];
+			const fileName = match[1];
+			const displayName = match[2] || fileName;
+			
+			// 检查是否已经是video标签
+			if (!this.isAlreadyVideoTag(content, match.index)) {
+				const videoTag = `<video src="${fileName}" controls>\n  您的浏览器不支持视频标签。\n</video>`;
+				newContent = newContent.replace(fullMatch, videoTag);
+				updated = true;
+			}
+		}
+
+		if (updated) {
+			this.isProcessing = true;
+			const cursorPos = editor.getCursor();
+			editor.setValue(newContent);
+			editor.setCursor(cursorPos); // 保持光标位置
+			this.isProcessing = false;
+		}
+	}
+
+	private isAlreadyVideoTag(content: string, index: number): boolean {
+		// 向前查找，看是否已经在video标签内
+		const beforeIndex = content.substring(0, index);
+		const lastOpeningVideo = beforeIndex.lastIndexOf('<video');
+		const lastClosingVideo = beforeIndex.lastIndexOf('</video>');
+		
+		// 如果最近的video开始标签比结束标签更近，则说明在video标签内
+		return lastOpeningVideo > lastClosingVideo;
 	}
 }
